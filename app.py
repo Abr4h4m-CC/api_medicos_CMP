@@ -6,6 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 import logging
 import re
@@ -22,7 +23,7 @@ URL_BASE = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/"
 
 
 def setup_driver():
-    """Configura Chrome para Render"""
+    """Configura Chrome portable para Render - SIN necesidad de Chrome instalado"""
     options = Options()
 
     # Opciones esenciales para Render
@@ -34,14 +35,14 @@ def setup_driver():
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-dev-shm-usage")
 
-    # Configuración adicional
+    # Configuración adicional de estabilidad
     options.add_argument("--remote-debugging-port=9222")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     try:
-        # Usar ChromeDriverManager con cache
-        driver_path = ChromeDriverManager().install()
+        # 🚀 SOLUCIÓN CLAVE: Usar ChromeType.GOOGLE para forzar Chrome portable
+        driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
         service = Service(driver_path)
         driver = webdriver.Chrome(service=service, options=options)
 
@@ -49,9 +50,10 @@ def setup_driver():
         driver.set_page_load_timeout(45)
         driver.implicitly_wait(15)
 
+        logging.info("✅ Chrome portable configurado exitosamente")
         return driver
     except Exception as e:
-        logging.error(f"Error configurando Chrome: {e}")
+        logging.error(f"❌ Error configurando Chrome portable: {e}")
         return None
 
 
@@ -71,7 +73,7 @@ def get_medico_data(cmp_number):
 
         wait = WebDriverWait(driver, 30)
 
-        logging.info(f"Iniciando búsqueda para CMP: {cmp_number}")
+        logging.info(f"🔍 Iniciando búsqueda para CMP: {cmp_number}")
 
         # Navegar a la página principal
         driver.get(URL_BASE)
@@ -138,14 +140,14 @@ def get_medico_data(cmp_number):
                 match = re.search(r'Especialidad:\s*(.*)', especialidad_text)
                 data["especialidad"] = match.group(1).strip() if match else "No disponible"
             except Exception as e:
-                logging.warning(f"No se pudo obtener especialidad: {e}")
+                logging.warning(f"⚠️ No se pudo obtener especialidad: {e}")
                 data["especialidad"] = "No disponible"
 
-            logging.info(f"Datos encontrados para CMP {cmp_number}: {data['nombres']}")
+            logging.info(f"✅ Datos encontrados para CMP {cmp_number}: {data['nombres']}")
             return data, 200
 
         except Exception as e:
-            logging.error(f"Error extrayendo datos de tabla: {e}")
+            logging.error(f"❌ Error extrayendo datos de tabla: {e}")
             return {
                 "cmp_number": cmp_number,
                 "status": "error",
@@ -153,7 +155,7 @@ def get_medico_data(cmp_number):
             }, 500
 
     except Exception as e:
-        logging.error(f"Error general en scraping: {e}")
+        logging.error(f"❌ Error general en scraping: {e}")
         return {
             "cmp_number": cmp_number,
             "status": "error",
@@ -163,16 +165,16 @@ def get_medico_data(cmp_number):
     finally:
         if driver:
             driver.quit()
-            logging.info("Driver cerrado correctamente")
+            logging.info("🔚 Driver cerrado correctamente")
 
 
 @app.route('/')
 def home():
     return jsonify({
         "message": "🚀 API de Validación CMP - Colegio Médico del Perú",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "estado": "ACTIVA",
-        "navegador": "Chrome Headless",
+        "navegador": "Chrome Portable (sin instalación requerida)",
         "uso": "Validación de colegiatura médica en Perú",
         "endpoints": {
             "validar_medico": "GET /api/v1/medico/<cmp_number>",
@@ -202,8 +204,8 @@ def health_check():
     return jsonify({
         "status": "activo",
         "servicio": "API Validación CMP",
-        "version": "3.0.0",
-        "navegador": "Chrome",
+        "version": "4.0.0",
+        "navegador": "Chrome Portable",
         "timestamp": time.time()
     })
 
@@ -212,14 +214,16 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
 
     print("=" * 60)
-    print("🚀 API DE VALIDACIÓN CMP - CHROME EDITION")
+    print("🚀 API DE VALIDACIÓN CMP - CHROME PORTABLE EDITION")
     print("=" * 60)
     print(f"📍 URL: https://api-medicos-cmp.onrender.com")
     print(f"🔧 Puerto: {port}")
-    print(f"🌐 Navegador: Chrome Headless")
+    print(f"🌐 Navegador: Chrome Portable (auto-descargado)")
     print("📚 Endpoints:")
     print(f"   • GET /api/v1/medico/<cmp_number>")
     print(f"   • GET /health")
+    print("=" * 60)
+    print("✅ Iniciando servicio...")
     print("=" * 60)
 
     app.run(host='0.0.0.0', port=port, debug=False)
