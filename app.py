@@ -1,16 +1,8 @@
 from flask import Flask, jsonify, request
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-
-import logging
+import requests
+from bs4 import BeautifulSoup
 import re
-import os
+import logging
 import time
 
 # Configurar logging
@@ -19,169 +11,140 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
-URL_BASE = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/"
-
-
-def setup_driver():
-    """Configura Chrome portable para Render - SIN necesidad de Chrome instalado"""
-    options = Options()
-
-    # Opciones esenciales para Render
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-dev-shm-usage")
-
-    # Configuración adicional de estabilidad
-    options.add_argument("--remote-debugging-port=9222")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-    try:
-        # 🚀 SOLUCIÓN CLAVE: Usar ChromeType.GOOGLE para forzar Chrome portable
-        driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
-        service = Service(driver_path)
-        driver = webdriver.Chrome(service=service, options=options)
-
-        # Configurar timeouts
-        driver.set_page_load_timeout(45)
-        driver.implicitly_wait(15)
-
-        logging.info("✅ Chrome portable configurado exitosamente")
-        return driver
-    except Exception as e:
-        logging.error(f"❌ Error configurando Chrome portable: {e}")
-        return None
 
 
 def get_medico_data(cmp_number):
-    """Realiza el scraping para obtener los datos del médico"""
+    """
+    Obtiene los datos del médico usando requests + BeautifulSoup (sin navegador)
+    """
     cmp_number = str(cmp_number).strip()
-    driver = None
 
     try:
-        driver = setup_driver()
-        if not driver:
-            return {
-                "cmp_number": cmp_number,
-                "status": "error",
-                "message": "No se pudo inicializar el navegador"
-            }, 500
+        # URL base y sesión
+        session = requests.Session()
+        base_url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/"
 
-        wait = WebDriverWait(driver, 30)
+        # Headers para simular navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'es-ES,es;q=0.8,en;q=0.5,en-US;q=0.3',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://aplicaciones.cmp.org.pe',
+            'Referer': 'https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/',
+        }
 
+        # 1. Obtener la página inicial para tener la sesión
         logging.info(f"🔍 Iniciando búsqueda para CMP: {cmp_number}")
+        response = session.get(base_url, headers=headers, timeout=30)
+        response.raise_for_status()
 
-        # Navegar a la página principal
-        driver.get(URL_BASE)
-        time.sleep(3)
+        # 2. Enviar el formulario de búsqueda
+        data = {
+            'cmp': cmp_number
+        }
 
-        # Buscar campo CMP
-        cmp_input = wait.until(
-            EC.presence_of_element_located((By.NAME, "cmp"))
-        )
-        cmp_input.clear()
-        cmp_input.send_keys(cmp_number)
+        search_url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/datos-colegiado.php"
+        response = session.post(search_url, data=data, headers=headers, timeout=30)
+        response.raise_for_status()
 
-        # Click en buscar
-        buscar_btn = wait.until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "input.btn.btn-sub[type='submit']"))
-        )
-        buscar_btn.click()
+        # 3. Analizar el HTML de respuesta
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Esperar resultados
-        wait.until(EC.url_contains("datos-colegiado.php"))
-        time.sleep(2)
-
-        # Verificar si no hay resultados
-        page_source = driver.page_source
-        if "No se encontró ningún Colegiado" in page_source:
+        # 4. Verificar si no hay resultados
+        if "No se encontró ningún Colegiado" in response.text:
             return {
                 "cmp_number": cmp_number,
                 "status": "no_encontrado",
                 "message": "No se encontró ningún médico con el CMP proporcionado"
             }, 404
 
-        # Extraer datos de la tabla
-        try:
-            table_row = wait.until(
-                EC.presence_of_element_located((By.XPATH, "//table//tr[@class='cabecera_tr2']"))
-            )
-            cells = table_row.find_elements(By.TAG_NAME, "td")
-
-            if len(cells) < 5:
-                return {
-                    "cmp_number": cmp_number,
-                    "status": "error",
-                    "message": "Estructura de tabla inesperada"
-                }, 500
-
-            # Construir respuesta
-            data = {
-                "cmp_number": cmp_number,
-                "cmp": cells[1].text.strip(),
-                "apellido_paterno": cells[2].text.strip(),
-                "apellido_materno": cells[3].text.strip(),
-                "nombres": cells[4].text.strip(),
-                "nombre_completo": f"{cells[4].text.strip()} {cells[2].text.strip()} {cells[3].text.strip()}",
-                "status": "encontrado",
-                "fuente": "Colegio Médico del Perú"
-            }
-
-            # Buscar especialidad
-            try:
-                especialidad_element = driver.find_element(
-                    By.XPATH, "//td[contains(text(), 'Especialidad:')]"
-                )
-                especialidad_text = especialidad_element.text
-                match = re.search(r'Especialidad:\s*(.*)', especialidad_text)
-                data["especialidad"] = match.group(1).strip() if match else "No disponible"
-            except Exception as e:
-                logging.warning(f"⚠️ No se pudo obtener especialidad: {e}")
-                data["especialidad"] = "No disponible"
-
-            logging.info(f"✅ Datos encontrados para CMP {cmp_number}: {data['nombres']}")
-            return data, 200
-
-        except Exception as e:
-            logging.error(f"❌ Error extrayendo datos de tabla: {e}")
+        # 5. Buscar la tabla con los datos
+        table_row = soup.find('tr', class_='cabecera_tr2')
+        if not table_row:
             return {
                 "cmp_number": cmp_number,
                 "status": "error",
-                "message": f"Error procesando los datos: {str(e)}"
+                "message": "No se encontró la tabla de datos en la respuesta"
             }, 500
 
-    except Exception as e:
-        logging.error(f"❌ Error general en scraping: {e}")
+        # 6. Extraer las celdas de datos
+        cells = table_row.find_all('td')
+        if len(cells) < 5:
+            return {
+                "cmp_number": cmp_number,
+                "status": "error",
+                "message": "Estructura de tabla inesperada"
+            }, 500
+
+        # 7. Construir respuesta con los datos
+        data = {
+            "cmp_number": cmp_number,
+            "cmp": cells[1].get_text(strip=True),
+            "apellido_paterno": cells[2].get_text(strip=True),
+            "apellido_materno": cells[3].get_text(strip=True),
+            "nombres": cells[4].get_text(strip=True),
+            "nombre_completo": f"{cells[4].get_text(strip=True)} {cells[2].get_text(strip=True)} {cells[3].get_text(strip=True)}",
+            "status": "encontrado",
+            "fuente": "Colegio Médico del Perú"
+        }
+
+        # 8. Buscar especialidad
+        try:
+            # Buscar en todo el HTML la línea que contiene "Especialidad:"
+            especialidad_text = soup.find(string=re.compile(r'Especialidad:'))
+            if especialidad_text:
+                match = re.search(r'Especialidad:\s*(.*)', especialidad_text)
+                if match:
+                    data["especialidad"] = match.group(1).strip()
+                else:
+                    data["especialidad"] = "No disponible"
+            else:
+                data["especialidad"] = "No disponible"
+        except Exception as e:
+            logging.warning(f"⚠️ No se pudo obtener especialidad: {e}")
+            data["especialidad"] = "No disponible"
+
+        logging.info(f"✅ Datos encontrados para CMP {cmp_number}: {data['nombres']}")
+        return data, 200
+
+    except requests.exceptions.Timeout:
         return {
             "cmp_number": cmp_number,
             "status": "error",
-            "message": f"Error al consultar el CMP: {str(e)}"
+            "message": "Tiempo de espera agotado al consultar el CMP"
         }, 500
-
-    finally:
-        if driver:
-            driver.quit()
-            logging.info("🔚 Driver cerrado correctamente")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ Error de conexión: {e}")
+        return {
+            "cmp_number": cmp_number,
+            "status": "error",
+            "message": f"Error de conexión con el servidor del CMP: {str(e)}"
+        }, 500
+    except Exception as e:
+        logging.error(f"❌ Error inesperado: {e}")
+        return {
+            "cmp_number": cmp_number,
+            "status": "error",
+            "message": f"Error inesperado: {str(e)}"
+        }, 500
 
 
 @app.route('/')
 def home():
     return jsonify({
         "message": "🚀 API de Validación CMP - Colegio Médico del Perú",
-        "version": "4.0.0",
+        "version": "5.0.0",
         "estado": "ACTIVA",
-        "navegador": "Chrome Portable (sin instalación requerida)",
+        "tecnologia": "Requests + BeautifulSoup (Sin navegador)",
         "uso": "Validación de colegiatura médica en Perú",
         "endpoints": {
             "validar_medico": "GET /api/v1/medico/<cmp_number>",
             "health_check": "GET /health",
             "documentacion": "GET /"
         },
-        "ejemplo": "https://api-medicos-cmp.onrender.com/api/v1/medico/067890"
+        "ejemplo": "https://api-medicos-cmp.onrender.com/api/v1/medico/067890",
+        "nota": "✅ Esta versión es más rápida y confiable - Sin dependencias de navegador"
     })
 
 
@@ -204,9 +167,10 @@ def health_check():
     return jsonify({
         "status": "activo",
         "servicio": "API Validación CMP",
-        "version": "4.0.0",
-        "navegador": "Chrome Portable",
-        "timestamp": time.time()
+        "version": "5.0.0",
+        "tecnologia": "Requests + BeautifulSoup",
+        "timestamp": time.time(),
+        "rendimiento": "Óptimo - Sin navegador"
     })
 
 
@@ -214,11 +178,12 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
 
     print("=" * 60)
-    print("🚀 API DE VALIDACIÓN CMP - CHROME PORTABLE EDITION")
+    print("🚀 API DE VALIDACIÓN CMP - VERSIÓN DEFINITIVA")
     print("=" * 60)
     print(f"📍 URL: https://api-medicos-cmp.onrender.com")
     print(f"🔧 Puerto: {port}")
-    print(f"🌐 Navegador: Chrome Portable (auto-descargado)")
+    print(f"⚡ Tecnología: Requests + BeautifulSoup")
+    print(f"🎯 Ventajas: Más rápido, más confiable, sin navegador")
     print("📚 Endpoints:")
     print(f"   • GET /api/v1/medico/<cmp_number>")
     print(f"   • GET /health")
