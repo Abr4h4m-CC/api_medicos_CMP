@@ -1,207 +1,185 @@
 from flask import Flask, jsonify, request
-import requests
-from bs4 import BeautifulSoup
-import re
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 import logging
 import time
 import os
-import urllib3
+import re
 
-# Desactivar advertencias de SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Configurar logging DETALLADO
-logging.basicConfig(
-    level=logging.DEBUG,  # Cambiado a DEBUG para más detalles
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-# Silenciar logs de Werkzeug solo en producción
-if os.environ.get('RENDER'):
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
+# Configurar logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app_start_time = time.time()
 
 
-def debug_html_response(html, cmp_number):
-    """Función para debuggear el HTML recibido"""
-    debug_info = {
-        "cmp_number": cmp_number,
-        "html_length": len(html),
-        "contains_no_results": "No se encontró ningún Colegiado" in html,
-        "contains_table_tag": "<table" in html,
-        "contains_cabecera_tr2": "cabecera_tr2" in html,
-        "contains_cmp_number": cmp_number in html,
-        "sample_html": html[:1000] + "..." if len(html) > 1000 else html
-    }
-    return debug_info
+def setup_chrome_driver():
+    """Configura Chrome para Render con opciones específicas"""
+    chrome_options = Options()
 
+    # Opciones esenciales para Render
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-images")  # Más rápido
 
-def get_medico_data(cmp_number):
-    """
-    Obtiene los datos del médico con debugging completo
-    """
-    cmp_number = str(cmp_number).strip()
+    # Configuración adicional para evitar detección
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    # En Render, Chrome ya está instalado, usar la ruta por defecto
+    chrome_options.binary_location = "/usr/bin/google-chrome"
 
     try:
-        # URL base y sesión
-        session = requests.Session()
-        base_url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/"
+        # Usar ChromeDriverManager para manejar el driver
+        from webdriver_manager.chrome import ChromeDriverManager
+        from webdriver_manager.core.os_manager import ChromeType
 
-        # Headers mejorados
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://aplicaciones.cmp.org.pe',
-            'Referer': 'https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'no-cache'
-        }
+        driver_path = ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install()
+        service = Service(driver_path)
 
-        # 1. Obtener la página inicial
-        logging.info(f"🔍 Paso 1: Obteniendo página inicial para CMP: {cmp_number}")
-        response = session.get(base_url, headers=headers, timeout=20, verify=False)
-        response.raise_for_status()
-        logging.info(f"✅ Página inicial obtenida. Status: {response.status_code}")
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # 2. Enviar el formulario de búsqueda
-        data = {'cmp': cmp_number}
-        search_url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/datos-colegiado.php"
+        # Ejecutar script para evitar detección
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        logging.info(f"🔍 Paso 2: Enviando formulario a {search_url}")
-        response = session.post(search_url, data=data, headers=headers, timeout=20, verify=False)
-        response.raise_for_status()
-        logging.info(f"✅ Formulario enviado. Status: {response.status_code}")
+        driver.set_page_load_timeout(30)
+        return driver
 
-        # 3. DEBUG: Analizar la respuesta cruda
-        debug_info = debug_html_response(response.text, cmp_number)
-        logging.debug(f"🔍 DEBUG INFO: {debug_info}")
+    except Exception as e:
+        logging.error(f"Error configurando Chrome: {e}")
+        return None
 
-        # 4. Verificar si no hay resultados
-        if "No se encontró ningún Colegiado" in response.text:
-            logging.info(f"❌ No se encontró médico para CMP: {cmp_number}")
+
+def get_medico_data_selenium(cmp_number):
+    """Obtiene datos usando Selenium con Chrome real"""
+    cmp_number = str(cmp_number).strip()
+    driver = None
+
+    try:
+        driver = setup_chrome_driver()
+        if not driver:
             return {
                 "cmp_number": cmp_number,
-                "status": "no_encontrado",
-                "message": "No se encontró ningún médico con el CMP proporcionado"
-            }, 404
+                "status": "error",
+                "message": "No se pudo inicializar el navegador"
+            }, 500
 
-        # 5. Analizar el HTML con BeautifulSoup
-        soup = BeautifulSoup(response.text, 'html.parser')
+        wait = WebDriverWait(driver, 25)
+        url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/"
 
-        # 6. ESTRATEGIAS MÚLTIPLES para encontrar la tabla
-        table = None
-        table_found_by = ""
+        logging.info(f"🚀 Navegando a: {url}")
+        driver.get(url)
+        time.sleep(3)  # Esperar carga inicial
 
-        # Estrategia 1: Buscar por atributos exactos (como en tu HTML)
-        table = soup.find('table', {'border': '1', 'cellspacing': '2'})
-        if table:
-            table_found_by = "atributos border=1 y cellspacing=2"
-            logging.info("✅ Tabla encontrada por atributos específicos")
+        # 1. Buscar campo CMP
+        logging.info("🔍 Buscando campo CMP...")
+        cmp_input = wait.until(
+            EC.presence_of_element_located((By.NAME, "cmp"))
+        )
+        cmp_input.clear()
+        cmp_input.send_keys(cmp_number)
+        logging.info(f"✅ CMP {cmp_number} ingresado")
 
-        # Estrategia 2: Buscar cualquier tabla que contenga el CMP
-        if not table:
-            all_tables = soup.find_all('table')
-            logging.info(f"🔍 Buscando en {len(all_tables)} tablas encontradas")
-            for i, tbl in enumerate(all_tables):
-                if cmp_number in tbl.get_text():
+        # 2. Hacer clic en Buscar
+        logging.info("🔍 Buscando botón Buscar...")
+        buscar_btn = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "input.btn.btn-sub[type='submit']"))
+        )
+        buscar_btn.click()
+        logging.info("✅ Clic en Buscar realizado")
+
+        # 3. Esperar resultados - verificar que no sea redirección
+        time.sleep(5)  # Esperar procesamiento
+
+        current_url = driver.current_url
+        logging.info(f"🌐 URL actual: {current_url}")
+
+        if "index.php" in current_url:
+            return {
+                "cmp_number": cmp_number,
+                "status": "error",
+                "message": "El CMP está bloqueado por reCAPTCHA. Intente con Selenium localmente."
+            }, 500
+
+        # 4. Buscar tabla de resultados
+        logging.info("🔍 Buscando tabla de resultados...")
+        try:
+            table = wait.until(
+                EC.presence_of_element_located((By.XPATH, "//table[@border='1' and @cellspacing='2']"))
+            )
+        except:
+            # Intentar encontrar cualquier tabla con el CMP
+            tables = driver.find_elements(By.TAG_NAME, "table")
+            table = None
+            for tbl in tables:
+                if cmp_number in tbl.text:
                     table = tbl
-                    table_found_by = f"contenido del CMP en tabla #{i}"
-                    logging.info(f"✅ Tabla encontrada por contenido del CMP")
                     break
 
-        # Estrategia 3: Buscar por clase cabecera_tr2 directamente
-        if not table:
-            table_row = soup.find('tr', class_='cabecera_tr2')
-            if table_row:
-                table = table_row.find_parent('table')
-                if table:
-                    table_found_by = "clase cabecera_tr2"
-                    logging.info("✅ Tabla encontrada por clase cabecera_tr2")
+            if not table:
+                if "No se encontró ningún Colegiado" in driver.page_source:
+                    return {
+                        "cmp_number": cmp_number,
+                        "status": "no_encontrado",
+                        "message": "No se encontró ningún médico con el CMP proporcionado"
+                    }, 404
+                else:
+                    return {
+                        "cmp_number": cmp_number,
+                        "status": "error",
+                        "message": "No se encontró la tabla de resultados"
+                    }, 500
 
-        if not table:
-            logging.error(f"❌ No se pudo encontrar ninguna tabla con los datos")
-            return {
-                "cmp_number": cmp_number,
-                "status": "error",
-                "message": "No se encontró la tabla de resultados",
-                "debug_info": debug_info  # Incluir info de debug en la respuesta
-            }, 500
-
-        # 7. Buscar la fila con los datos
-        table_row = None
-
-        # Estrategia 1: Buscar por clase
-        table_row = table.find('tr', class_='cabecera_tr2')
-        if table_row:
-            logging.info("✅ Fila encontrada por clase cabecera_tr2")
-
-        # Estrategia 2: Buscar cualquier fila que contenga el CMP
-        if not table_row:
-            for tr in table.find_all('tr'):
-                if cmp_number in tr.get_text():
-                    table_row = tr
-                    logging.info("✅ Fila encontrada por contenido del CMP")
+        # 5. Buscar fila con datos
+        logging.info("🔍 Buscando fila con datos...")
+        try:
+            table_row = table.find_element(By.XPATH, ".//tr[contains(@class, 'cabecera_tr2')]")
+        except:
+            # Buscar cualquier fila que contenga el CMP
+            rows = table.find_elements(By.TAG_NAME, "tr")
+            table_row = None
+            for row in rows:
+                if cmp_number in row.text:
+                    table_row = row
                     break
 
-        if not table_row:
-            logging.error("❌ No se pudo encontrar la fila con los datos")
-            return {
-                "cmp_number": cmp_number,
-                "status": "error",
-                "message": "No se encontró la fila con los datos del médico",
-                "debug_info": debug_info
-            }, 500
+            if not table_row:
+                return {
+                    "cmp_number": cmp_number,
+                    "status": "error",
+                    "message": "No se encontró la fila con los datos del médico"
+                }, 500
 
-        # 8. Extraer las celdas de datos
-        cells = table_row.find_all('td')
-        logging.info(f"🔍 Encontradas {len(cells)} celdas en la fila")
+        # 6. Extraer celdas
+        cells = table_row.find_elements(By.TAG_NAME, "td")
+        logging.info(f"📊 Celdas encontradas: {len(cells)}")
 
         if len(cells) < 5:
             return {
                 "cmp_number": cmp_number,
                 "status": "error",
-                "message": f"Estructura de tabla inesperada. Celdas encontradas: {len(cells)}",
-                "debug_info": debug_info
+                "message": f"Estructura de tabla inesperada. Celdas: {len(cells)}"
             }, 500
 
-        # 9. EXTRAER DATOS - Buscar el CMP en las celdas para encontrar índices correctos
-        cmp_index = None
-        for i, cell in enumerate(cells):
-            if cell.get_text(strip=True) == cmp_number:
-                cmp_index = i
-                break
+        # 7. Extraer datos (índices según tu HTML)
+        cmp_val = cells[1].text.strip()
+        apellido_paterno = cells[2].text.strip()
+        apellido_materno = cells[3].text.strip()
+        nombres = cells[4].text.strip()
 
-        # Si no encontramos el CMP exacto, usar índices por defecto
-        if cmp_index is None:
-            cmp_index = 1  # Índice más común según tu HTML
-            logging.warning("⚠️ No se encontró el CMP exacto en celdas, usando índice por defecto")
-
-        # Calcular índices relativos
-        apellido_paterno_index = cmp_index + 1
-        apellido_materno_index = cmp_index + 2
-        nombres_index = cmp_index + 3
-
-        # Verificar que los índices sean válidos
-        if nombres_index >= len(cells):
-            return {
-                "cmp_number": cmp_number,
-                "status": "error",
-                "message": f"Índices de celdas inválidos para la estructura",
-                "debug_info": debug_info
-            }, 500
-
-        # 10. Extraer datos
-        cmp_val = cells[cmp_index].get_text(strip=True)
-        apellido_paterno = cells[apellido_paterno_index].get_text(strip=True)
-        apellido_materno = cells[apellido_materno_index].get_text(strip=True)
-        nombres = cells[nombres_index].get_text(strip=True)
-
-        # 11. Construir respuesta
         data = {
             "cmp_number": cmp_number,
             "cmp": cmp_val,
@@ -210,39 +188,45 @@ def get_medico_data(cmp_number):
             "nombres": nombres,
             "nombre_completo": f"{nombres} {apellido_paterno} {apellido_materno}",
             "status": "encontrado",
-            "fuente": "Colegio Médico del Perú",
-            "especialidad": "Consultar en página de detalles",
-            "debug": {
-                "tabla_encontrada_por": table_found_by,
-                "celdas_encontradas": len(cells),
-                "indice_cmp": cmp_index
-            }
+            "fuente": "Colegio Médico del Perú"
         }
 
-        logging.info(f"✅ DATOS REALES encontrados para CMP {cmp_number}: {data['nombre_completo']}")
+        # 8. Intentar obtener especialidad desde página de detalles
+        try:
+            detail_link = cells[0].find_element(By.TAG_NAME, "a")
+            if detail_link:
+                detail_url = detail_link.get_attribute("href")
+                if detail_url:
+                    # Navegar a página de detalles
+                    driver.get(detail_url)
+                    time.sleep(2)
+
+                    # Buscar especialidad en la página de detalles
+                    page_text = driver.page_source
+                    especialidad_match = re.search(r'Especialidad[:\s]*([^\n<]+)', page_text, re.IGNORECASE)
+                    if especialidad_match:
+                        data["especialidad"] = especialidad_match.group(1).strip()
+                    else:
+                        data["especialidad"] = "No disponible"
+        except Exception as e:
+            logging.warning(f"⚠️ No se pudo obtener especialidad: {e}")
+            data["especialidad"] = "No disponible"
+
+        logging.info(f"✅ DATOS ENCONTRADOS: {data['nombre_completo']}")
         return data, 200
 
-    except requests.exceptions.Timeout:
-        logging.error("❌ Timeout en la consulta")
-        return {
-            "cmp_number": cmp_number,
-            "status": "error",
-            "message": "Tiempo de espera agotado al consultar el CMP"
-        }, 500
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Error de conexión: {e}")
-        return {
-            "cmp_number": cmp_number,
-            "status": "error",
-            "message": f"Error de conexión: {str(e)}"
-        }, 500
     except Exception as e:
-        logging.error(f"❌ Error inesperado: {e}")
+        logging.error(f"❌ Error en Selenium: {e}")
         return {
             "cmp_number": cmp_number,
             "status": "error",
-            "message": f"Error inesperado: {str(e)}"
+            "message": f"Error al consultar: {str(e)}"
         }, 500
+
+    finally:
+        if driver:
+            driver.quit()
+            logging.info("🔚 Navegador cerrado")
 
 
 @app.route('/')
@@ -250,18 +234,17 @@ def home():
     uptime = time.time() - app_start_time
     return jsonify({
         "message": "🚀 API de Validación CMP - Colegio Médico del Perú",
-        "version": "10.0.0",
-        "estado": "ACTIVA CON DEBUG",
+        "version": "11.0.0",
+        "estado": "ACTIVA CON SELENIUM",
         "uptime_seconds": round(uptime, 2),
-        "tecnologia": "Requests + BeautifulSoup",
-        "uso": "Validación de colegiatura médica en Perú - CON DEBUGGING",
+        "tecnologia": "Selenium + Chrome Real",
+        "uso": "Validación de colegiatura médica en Perú - DATOS 100% REALES",
         "endpoints": {
             "validar_medico": "GET /api/v1/medico/<cmp_number>",
             "health_check": "GET /health",
-            "test_conexion": "GET /test",
-            "debug_cmp": "GET /debug/<cmp_number>"
+            "status": "GET /status"
         },
-        "nota": "✅ Versión con debugging completo"
+        "nota": "✅ Usando Selenium con Chrome real para evitar reCAPTCHA"
     })
 
 
@@ -274,7 +257,7 @@ def get_medico(cmp_number):
             "message": "El número CMP debe contener solo dígitos numéricos"
         }), 400
 
-    data, status_code = get_medico_data(cmp_number.strip())
+    data, status_code = get_medico_data_selenium(cmp_number.strip())
     return jsonify(data), status_code
 
 
@@ -285,81 +268,13 @@ def health_check():
     return jsonify({
         "status": "activo",
         "servicio": "API Validación CMP",
-        "version": "10.0.0",
-        "tecnologia": "Requests + BeautifulSoup",
+        "version": "11.0.0",
+        "tecnologia": "Selenium + Chrome",
         "datos": "100% REALES del CMP",
         "uptime_seconds": round(uptime, 2),
         "timestamp": time.time(),
-        "estado": "🟢 CON DEBUGGING"
+        "estado": "🟢 CON SELENIUM"
     })
-
-
-@app.route('/test', methods=['GET'])
-def test_connection():
-    """Endpoint para probar la conexión con el CMP"""
-    try:
-        response = requests.get("https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/",
-                                verify=False, timeout=10)
-        return jsonify({
-            "status": "conexion_exitosa",
-            "mensaje": "Conexión al CMP establecida correctamente",
-            "codigo_estado": response.status_code
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error_conexion",
-            "mensaje": f"Error conectando al CMP: {str(e)}"
-        }), 500
-
-
-# NUEVO ENDPOINT: Debugging completo
-@app.route('/debug/<cmp_number>', methods=['GET'])
-def debug_cmp(cmp_number):
-    """Endpoint para debugging completo - muestra TODO el proceso"""
-    try:
-        session = requests.Session()
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-
-        # 1. Obtener página inicial
-        response1 = session.get("https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/",
-                                headers=headers, verify=False, timeout=20)
-
-        # 2. Enviar formulario
-        data = {'cmp': cmp_number}
-        response2 = session.post("https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/datos-colegiado.php",
-                                 data=data, headers=headers, verify=False, timeout=20)
-
-        # 3. Analizar respuesta
-        soup = BeautifulSoup(response2.text, 'html.parser')
-        tables = soup.find_all('table')
-
-        debug_info = {
-            "cmp_number": cmp_number,
-            "paso_1_status": response1.status_code,
-            "paso_2_status": response2.status_code,
-            "longitud_html": len(response2.text),
-            "tablas_encontradas": len(tables),
-            "contiene_no_results": "No se encontró ningún Colegiado" in response2.text,
-            "contiene_cmp": cmp_number in response2.text,
-            "contiene_table_tag": "<table" in response2.text,
-            "contiene_cabecera_tr2": "cabecera_tr2" in response2.text,
-            "url_final": response2.url,
-            "preview_html": response2.text[:2000] + "..." if len(response2.text) > 2000 else response2.text
-        }
-
-        # Detalles de cada tabla encontrada
-        for i, table in enumerate(tables):
-            debug_info[f"tabla_{i}_filas"] = len(table.find_all('tr'))
-            debug_info[f"tabla_{i}_contenido"] = table.get_text(strip=True)[:200]
-
-        return jsonify(debug_info)
-
-    except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
 
 
 @app.route('/status', methods=['GET'])
@@ -368,31 +283,30 @@ def status():
     uptime = time.time() - app_start_time
     return jsonify({
         "estado": "operacional",
-        "version": "10.0.0",
+        "version": "11.0.0",
         "uptime_segundos": round(uptime, 2),
         "timestamp": time.time(),
         "entorno": "production",
-        "modo": "debugging"
+        "tecnologia": "Selenium WebDriver"
     })
 
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    is_render = os.environ.get('RENDER') is not None
 
     print("=" * 70)
-    print("🚀 API DE VALIDACIÓN CMP - VERSIÓN DEBUG")
+    print("🚀 API DE VALIDACIÓN CMP - SELENIUM CHROME")
     print("=" * 70)
     print(f"📍 URL: https://api-medicos-cmp.onrender.com")
     print(f"🔧 Puerto: {port}")
-    print(f"🐛 Modo: DEBUGGING COMPLETO")
+    print(f"🌐 Navegador: Chrome Real con Selenium")
+    print(f"🎯 OBJETIVO: Evitar reCAPTCHA y obtener datos REALES")
     print("📚 Endpoints:")
-    print(f"   • GET /api/v1/medico/<cmp_number> (Principal)")
-    print(f"   • GET /debug/<cmp_number> (DEBUG completo)")
+    print(f"   • GET /api/v1/medico/<cmp_number>")
     print(f"   • GET /health")
-    print(f"   • GET /test")
+    print(f"   • GET /status")
     print("=" * 70)
-    print("✅ Iniciando servicio con debugging...")
+    print("✅ Iniciando servicio con Selenium...")
     print("=" * 70)
 
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=port, debug=False)
