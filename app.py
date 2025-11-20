@@ -1,11 +1,14 @@
-import os
-
 from flask import Flask, jsonify, request
 import requests
 from bs4 import BeautifulSoup
 import re
 import logging
 import time
+import os
+import urllib3
+
+# Desactivar advertencias de SSL (solo para desarrollo)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,7 +20,8 @@ app = Flask(__name__)
 
 def get_medico_data(cmp_number):
     """
-    Obtiene los datos del médico usando requests + BeautifulSoup (sin navegador)
+    Obtiene los datos del médico usando requests + BeautifulSoup
+    CON desactivación de verificación SSL
     """
     cmp_number = str(cmp_number).strip()
 
@@ -34,20 +38,21 @@ def get_medico_data(cmp_number):
             'Content-Type': 'application/x-www-form-urlencoded',
             'Origin': 'https://aplicaciones.cmp.org.pe',
             'Referer': 'https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/',
+            'Connection': 'keep-alive'
         }
 
-        # 1. Obtener la página inicial para tener la sesión
+        # 1. Obtener la página inicial (CON verify=False para SSL)
         logging.info(f"🔍 Iniciando búsqueda para CMP: {cmp_number}")
-        response = session.get(base_url, headers=headers, timeout=30)
+        response = session.get(base_url, headers=headers, timeout=30, verify=False)
         response.raise_for_status()
 
-        # 2. Enviar el formulario de búsqueda
+        # 2. Enviar el formulario de búsqueda (CON verify=False)
         data = {
             'cmp': cmp_number
         }
 
         search_url = "https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/datos-colegiado.php"
-        response = session.post(search_url, data=data, headers=headers, timeout=30)
+        response = session.post(search_url, data=data, headers=headers, timeout=30, verify=False)
         response.raise_for_status()
 
         # 3. Analizar el HTML de respuesta
@@ -64,11 +69,14 @@ def get_medico_data(cmp_number):
         # 5. Buscar la tabla con los datos
         table_row = soup.find('tr', class_='cabecera_tr2')
         if not table_row:
-            return {
-                "cmp_number": cmp_number,
-                "status": "error",
-                "message": "No se encontró la tabla de datos en la respuesta"
-            }, 500
+            # Intentar buscar por otro patrón de clase
+            table_row = soup.find('tr', style="background-color:#FFFFFF;")
+            if not table_row:
+                return {
+                    "cmp_number": cmp_number,
+                    "status": "error",
+                    "message": "No se encontró la tabla de datos en la respuesta"
+                }, 500
 
         # 6. Extraer las celdas de datos
         cells = table_row.find_all('td')
@@ -76,7 +84,7 @@ def get_medico_data(cmp_number):
             return {
                 "cmp_number": cmp_number,
                 "status": "error",
-                "message": "Estructura de tabla inesperada"
+                "message": f"Estructura de tabla inesperada. Celdas encontradas: {len(cells)}"
             }, 500
 
         # 7. Construir respuesta con los datos
@@ -94,11 +102,13 @@ def get_medico_data(cmp_number):
         # 8. Buscar especialidad
         try:
             # Buscar en todo el HTML la línea que contiene "Especialidad:"
-            especialidad_text = soup.find(string=re.compile(r'Especialidad:'))
-            if especialidad_text:
-                match = re.search(r'Especialidad:\s*(.*)', especialidad_text)
-                if match:
-                    data["especialidad"] = match.group(1).strip()
+            especialidad_elements = soup.find_all(string=re.compile(r'Especialidad:'))
+            if especialidad_elements:
+                for element in especialidad_elements:
+                    match = re.search(r'Especialidad:\s*(.*)', element)
+                    if match and match.group(1).strip():
+                        data["especialidad"] = match.group(1).strip()
+                        break
                 else:
                     data["especialidad"] = "No disponible"
             else:
@@ -121,7 +131,7 @@ def get_medico_data(cmp_number):
         return {
             "cmp_number": cmp_number,
             "status": "error",
-            "message": f"Error de conexión con el servidor del CMP: {str(e)}"
+            "message": f"Error de conexión: {str(e)}"
         }, 500
     except Exception as e:
         logging.error(f"❌ Error inesperado: {e}")
@@ -136,9 +146,9 @@ def get_medico_data(cmp_number):
 def home():
     return jsonify({
         "message": "🚀 API de Validación CMP - Colegio Médico del Perú",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "estado": "ACTIVA",
-        "tecnologia": "Requests + BeautifulSoup (Sin navegador)",
+        "tecnologia": "Requests + BeautifulSoup (SSL desactivado)",
         "uso": "Validación de colegiatura médica en Perú",
         "endpoints": {
             "validar_medico": "GET /api/v1/medico/<cmp_number>",
@@ -146,7 +156,7 @@ def home():
             "documentacion": "GET /"
         },
         "ejemplo": "https://api-medicos-cmp.onrender.com/api/v1/medico/067890",
-        "nota": "✅ Esta versión es más rápida y confiable - Sin dependencias de navegador"
+        "nota": "✅ SSL verification desactivado para compatibilidad"
     })
 
 
@@ -169,26 +179,47 @@ def health_check():
     return jsonify({
         "status": "activo",
         "servicio": "API Validación CMP",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "tecnologia": "Requests + BeautifulSoup",
+        "ssl_verification": "desactivado",
         "timestamp": time.time(),
-        "rendimiento": "Óptimo - Sin navegador"
+        "rendimiento": "Óptimo"
     })
+
+
+# Ruta de prueba para verificar que la API funciona
+@app.route('/test', methods=['GET'])
+def test_connection():
+    """Endpoint para probar la conexión con el CMP"""
+    try:
+        response = requests.get("https://aplicaciones.cmp.org.pe/conoce_a_tu_medico/",
+                                verify=False, timeout=10)
+        return jsonify({
+            "status": "conexion_exitosa",
+            "mensaje": "Conexión al CMP establecida correctamente",
+            "codigo_estado": response.status_code
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error_conexion",
+            "mensaje": f"Error conectando al CMP: {str(e)}"
+        }), 500
 
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
 
     print("=" * 60)
-    print("🚀 API DE VALIDACIÓN CMP - VERSIÓN DEFINITIVA")
+    print("🚀 API DE VALIDACIÓN CMP - SSL FIXED VERSION")
     print("=" * 60)
     print(f"📍 URL: https://api-medicos-cmp.onrender.com")
     print(f"🔧 Puerto: {port}")
     print(f"⚡ Tecnología: Requests + BeautifulSoup")
-    print(f"🎯 Ventajas: Más rápido, más confiable, sin navegador")
+    print(f"🔓 SSL: Verificación desactivada")
     print("📚 Endpoints:")
     print(f"   • GET /api/v1/medico/<cmp_number>")
     print(f"   • GET /health")
+    print(f"   • GET /test (prueba de conexión)")
     print("=" * 60)
     print("✅ Iniciando servicio...")
     print("=" * 60)
